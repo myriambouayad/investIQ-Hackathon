@@ -1,138 +1,158 @@
 import {
-  AreaChart,
   Area,
+  ComposedChart,
+  Line,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  ReferenceLine,
-  Legend,
 } from 'recharts';
 import type { Projection } from '../../types';
+import { Key, Tip } from './chartkit';
+import { BARE_AXIS, C, CURSOR, money, moneyFull, pct } from './tokens';
 
 interface Props {
   projection: Projection;
   goal?: number | null;
 }
 
-function fmt(n: number) {
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(0)}K`;
-  return `$${n.toFixed(0)}`;
-}
-
+/**
+ * The forward fan.
+ *
+ * Three overlapping filled series is the usual rendering and it is the wrong
+ * one: it reads as three forecasts when there is only one, with uncertainty
+ * around it. Drawn as nested bands — 10th–90th wide and pale, 25th–75th
+ * tight and darker, the median a single line — the eye gets the shape of the
+ * distribution instead of three competing predictions.
+ */
 export function MonteCarloChart({ projection, goal }: Props) {
-  // Downsample to monthly for performance (show every 3rd month)
-  const data = projection.series.filter((_, i) => i % 3 === 0 || i === projection.series.length - 1);
+  // Quarterly resolution is plenty at this horizon and keeps the path count
+  // low enough that hover stays responsive.
+  const data = projection.series
+    .filter((_, i) => i % 3 === 0 || i === projection.series.length - 1)
+    .map((p) => ({
+      month: p.month,
+      band90: [p.p10, p.p90] as [number, number],
+      band50: [p.p25, p.p75] as [number, number],
+      p50: p.p50,
+      p10: p.p10,
+      p90: p.p90,
+      p25: p.p25,
+      p75: p.p75,
+      contributed: p.contributed,
+    }));
 
   return (
-    <div>
+    <div className="flex flex-col gap-3">
       <ResponsiveContainer width="100%" height={300}>
-        <AreaChart data={data} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-          <defs>
-            <linearGradient id="p10Grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#ef4444" stopOpacity={0.2} />
-              <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="p50Grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#6366f1" stopOpacity={0.25} />
-              <stop offset="95%" stopColor="#6366f1" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="p90Grad" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#10b981" stopOpacity={0.2} />
-              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" stroke="#374151" />
+        <ComposedChart data={data} margin={{ top: 8, right: 4, bottom: 0, left: 4 }}>
           <XAxis
             dataKey="month"
-            tickFormatter={(v: number) => `Y${Math.floor(v / 12)}`}
-            tick={{ fill: '#9ca3af', fontSize: 11 }}
-            axisLine={{ stroke: '#374151' }}
-            tickLine={false}
-            interval={Math.floor(data.length / 5)}
+            {...BARE_AXIS}
+            tickFormatter={(v: number) => (v === 0 ? 'now' : `${Math.round(v / 12)}y`)}
+            interval={Math.max(1, Math.floor(data.length / 6))}
+            minTickGap={24}
           />
-          <YAxis
-            tickFormatter={fmt}
-            tick={{ fill: '#9ca3af', fontSize: 11 }}
-            axisLine={false}
-            tickLine={false}
-            width={60}
-          />
+          <YAxis {...BARE_AXIS} orientation="right" tickFormatter={money} width={52} tickCount={5} />
+
           <Tooltip
-            contentStyle={{ background: '#1f2937', border: '1px solid #374151', borderRadius: 8 }}
-            labelStyle={{ color: '#9ca3af', fontSize: 12 }}
-            labelFormatter={(v: any) => `Month ${v} (Year ${Math.floor(v / 12)})`}
-            formatter={(val: any, name: any) => [fmt(val), name]}
+            cursor={CURSOR}
+            content={({ active, payload }: any) => {
+              if (!active || !payload?.length) return null;
+              const p = payload[0].payload;
+              return (
+                <Tip
+                  label={`year ${(p.month / 12).toFixed(1)}`}
+                  rows={[
+                    { name: '90th pct', value: moneyFull(p.p90), color: C.up },
+                    { name: 'Median', value: moneyFull(p.p50), color: C.accent },
+                    { name: '10th pct', value: moneyFull(p.p10), color: C.down },
+                    { name: 'Invested', value: moneyFull(p.contributed), color: C.muted },
+                  ]}
+                />
+              );
+            }}
           />
-          <Legend
-            formatter={(value) => (
-              <span style={{ color: '#9ca3af', fontSize: 12 }}>{value}</span>
-            )}
-          />
-          {goal && (
-            <ReferenceLine
-              y={goal}
-              stroke="#f59e0b"
-              strokeDasharray="5 5"
-              label={{ value: 'Goal', fill: '#f59e0b', fontSize: 11 }}
-            />
-          )}
+
           <Area
-            type="monotone"
-            dataKey="p90"
-            name="Best case (90th)"
-            stroke="#10b981"
-            strokeWidth={1.5}
-            fill="url(#p90Grad)"
-            dot={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="p50"
-            name="Median (50th)"
-            stroke="#6366f1"
-            strokeWidth={2}
-            fill="url(#p50Grad)"
-            dot={false}
+            dataKey="band90"
+            stroke={C.accent}
+            strokeOpacity={0.3}
+            strokeWidth={1}
+            fill={C.accent}
+            fillOpacity={0.14}
+            isAnimationActive={false}
           />
           <Area
-            type="monotone"
-            dataKey="p10"
-            name="Bad case (10th)"
-            stroke="#ef4444"
-            strokeWidth={1.5}
-            fill="url(#p10Grad)"
-            dot={false}
+            dataKey="band50"
+            stroke="none"
+            fill={C.accent}
+            fillOpacity={0.28}
+            isAnimationActive={false}
           />
-          <Area
+          <Line
             type="monotone"
             dataKey="contributed"
-            name="Total Invested"
-            stroke="#6b7280"
+            stroke={C.muted}
             strokeWidth={1}
-            fill="none"
-            dot={false}
             strokeDasharray="4 4"
+            dot={false}
+            isAnimationActive={false}
           />
-        </AreaChart>
+          <Line
+            type="monotone"
+            dataKey="p50"
+            stroke={C.accent}
+            strokeWidth={2}
+            dot={false}
+            activeDot={{ r: 3.5, fill: C.accent, stroke: 'var(--color-bg)', strokeWidth: 2 }}
+            isAnimationActive={false}
+          />
+
+          {goal ? (
+            <ReferenceLine
+              y={goal}
+              stroke={C.up}
+              strokeDasharray="5 4"
+              strokeOpacity={0.8}
+              label={{
+                value: `goal ${money(goal)}`,
+                fill: 'var(--color-emerald-400)',
+                fontSize: 10,
+                position: 'insideTopLeft',
+              }}
+            />
+          ) : null}
+        </ComposedChart>
       </ResponsiveContainer>
 
-      {/* Final value callouts */}
-      <div className="grid grid-cols-3 gap-3 mt-4">
-        <div className="bg-red-900/20 border border-red-800/50 rounded-lg p-3 text-center">
-          <p className="text-xs text-gray-400">Bad case (10th pct)</p>
-          <p className="text-lg font-bold text-red-400">{fmt(projection.final_p10)}</p>
-        </div>
-        <div className="bg-indigo-900/20 border border-indigo-800/50 rounded-lg p-3 text-center">
-          <p className="text-xs text-gray-400">Median (50th pct)</p>
-          <p className="text-lg font-bold text-indigo-400">{fmt(projection.final_p50)}</p>
-        </div>
-        <div className="bg-emerald-900/20 border border-emerald-800/50 rounded-lg p-3 text-center">
-          <p className="text-xs text-gray-400">Best case (90th pct)</p>
-          <p className="text-lg font-bold text-emerald-400">{fmt(projection.final_p90)}</p>
-        </div>
+      <Key
+        items={[
+          { label: 'Median path', color: C.accent },
+          { label: '25th–75th', color: 'color-mix(in srgb, var(--color-accent) 45%, transparent)' },
+          { label: '10th–90th', color: 'color-mix(in srgb, var(--color-accent) 22%, transparent)' },
+          { label: 'Total invested', color: C.muted, dashed: true },
+        ]}
+      />
+
+      {/* Outcome spread. Read as one sentence: bad case, expected, good case. */}
+      <div className="grid grid-cols-3 divide-x divide-gray-700/50 border-t border-gray-700/50 pt-3 mt-1">
+        {(
+          [
+            ['10th percentile', projection.final_p10, 'text-red-400', 'if things go badly'],
+            ['Median outcome', projection.final_p50, 'text-gray-50', 'half of paths beat this'],
+            ['90th percentile', projection.final_p90, 'text-emerald-400', 'if things go well'],
+          ] as const
+        ).map(([label, value, tone, note], i) => (
+          <div key={label} className={i === 0 ? 'pr-3' : 'px-3'}>
+            <p className="eyebrow">{label}</p>
+            <p className={`figure figure-md mt-1 ${tone}`}>{moneyFull(value)}</p>
+            <p className="text-xs text-gray-500 mt-0.5">
+              {i === 1 ? note : `${pct(value / projection.final_p50 - 1, 0)} vs median`}
+            </p>
+          </div>
+        ))}
       </div>
     </div>
   );

@@ -4,11 +4,19 @@
 /* ══════════════════════════════════════════════════════════════════════════
    InvestIQ
 
-   The subject is a risk desk — an instrument panel for money. That rules out
-   the two obvious fintech defaults: indigo-on-near-black SaaS, and the neon
-   crypto terminal. Instead, a blue-cast slate ground with brass as the only
-   accent. Brass reads as instrumentation rather than notification, and it is
-   rare enough in this category to be recognisable.
+   The subject is a trading desk — an instrument panel for money. Two things
+   carry that read, and they are not the accent colour:
+
+   1. P&L is the loudest thing on screen. Direction (up / down) outranks
+      brand. Every other surface is monochrome so the green and the red
+      have nowhere to hide.
+   2. Numbers are the interface. They are large, tabular, and tightly
+      tracked; labels shrink out of the way. A figure never shares its
+      weight with the word describing it.
+
+   Ground is near-black rather than slate-with-a-tint: it lets a chart bleed
+   to the panel edge without a seam, which is what makes a quote screen feel
+   continuous instead of like a stack of widgets.
 
    Components across the app use Tailwind's grey and indigo ramps directly
    (bg-gray-900, text-indigo-400). Rather than edit twenty files, both themes
@@ -17,25 +25,27 @@
    ══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  /* Slate ground. Blue-cast, never pure black — pure black with a bright
-     accent is the default trading-app look and reads as generic. */
-  --color-gray-950: #080D13;
-  --color-gray-900: #0C1219;
-  --color-gray-800: #121A24;
-  --color-gray-750: #16202B;
-  --color-gray-700: #1E2A37;
-  --color-gray-600: #2A3845;
-  --color-gray-500: #5A6B7C;
-  --color-gray-400: #8798A8;
-  --color-gray-300: #A9B8C6;
-  --color-gray-200: #CBD6E0;
-  --color-gray-100: #E1E9F0;
-  --color-gray-50:  #F0F5F9;
+  /* Ground. Near-black, a hair of blue so it is not a dead grey. The steps
+     are deliberately close together — a trading surface reads as one plane
+     with hairlines drawn on it, not as stacked cards. */
+  --color-gray-950: #05070A;
+  --color-gray-900: #090C11;
+  --color-gray-800: #0E1218;
+  --color-gray-750: #131820;
+  --color-gray-700: #1B2129;
+  --color-gray-600: #2A323C;
+  --color-gray-500: #5C6775;
+  --color-gray-400: #8B96A5;
+  --color-gray-300: #AEB8C5;
+  --color-gray-200: #CED6E0;
+  --color-gray-100: #E4EAF1;
+  --color-gray-50:  #F2F6FA;
 
-  /* Brass. The single accent, reserved for primary actions and active state. */
-  --color-indigo-900: #3A2B0E;
-  --color-indigo-800: #4E3A13;
-  --color-indigo-700: #6B5019;
+  /* Brass. Interactive state only — buttons, focus, the active nav item.
+     It never marks a number, so it can never be confused with direction. */
+  --color-indigo-900: #33260C;
+  --color-indigo-800: #493611;
+  --color-indigo-700: #674C18;
   --color-indigo-600: #A87C28;
   --color-indigo-500: #C89544;
   --color-indigo-400: #D9A855;
@@ -43,63 +53,68 @@
   --color-indigo-200: #EFD5A8;
   --color-indigo-100: #F7E9CE;
 
-  /* Direction. Teal-green against warm coral stays distinguishable under
-     deuteranopia, where the stock green/red pair collapses. Colour never
-     carries meaning alone — every figure keeps its sign. */
-  --color-emerald-900: #0A2E24;
-  --color-emerald-800: #0F4636;
-  --color-emerald-400: #6FCCA9;
-  --color-emerald-300: #93DCC1;
-  --color-green-400:   #6FCCA9;
-  --color-green-500:   #4FBE95;
+  /* Direction. Teal-leaning green against warm coral stays distinguishable
+     under deuteranopia, where the stock green/red pair collapses. Both are
+     pushed bright — on a near-black ground they are the page's only real
+     colour. Colour never carries meaning alone: every figure keeps its sign. */
+  --color-emerald-900: #04231A;
+  --color-emerald-800: #073A2B;
+  --color-emerald-500: #00D084;
+  --color-emerald-400: #17E39A;
+  --color-emerald-300: #6FF0C1;
+  --color-green-400:   #17E39A;
+  --color-green-500:   #00D084;
 
-  --color-red-900: #3A1A14;
-  --color-red-800: #4E2219;
-  --color-red-700: #6B2F22;
-  --color-red-500: #B84A33;
-  --color-red-400: #C9573F;
-  --color-red-300: #DD7B62;
+  --color-red-900: #2B0F0B;
+  --color-red-800: #431811;
+  --color-red-700: #63251A;
+  --color-red-500: #F05137;
+  --color-red-400: #FF6B4F;
+  --color-red-300: #FF9A85;
 
-  --color-blue-900: #10263A;
-  --color-blue-400: #5BA3D0;
-  --color-blue-300: #8AC0E0;
+  --color-blue-900: #0A1D2E;
+  --color-blue-400: #4FA8E0;
+  --color-blue-300: #85C5EC;
 
   --color-yellow-400: #D9A855;
   --color-amber-400: #D9A855;
-  --color-white: #E6EDF3;
+  --color-white: #F2F6FA;
 
-  --color-bg: #0C1219;
-  --color-surface: #121A24;
-  --color-card: #18222E;
-  --color-border: #263340;
-  --color-accent: #C89544;
-  --color-accent-hover: #D9A855;
-  --color-green: #6FCCA9;
-  --color-red: #C9573F;
+  --color-bg: #05070A;
+  --color-surface: #090C11;
+  --color-card: #0E1218;
+  --color-border: #1B2129;
+  --color-hairline: #161B23;
+  --color-accent: #D9A855;
+  --color-accent-hover: #E5BE7C;
+  --color-up: #17E39A;
+  --color-down: #FF6B4F;
+  --color-green: #17E39A;
+  --color-red: #FF6B4F;
   --color-yellow: #D9A855;
-  --color-text: #E6EDF3;
-  --color-muted: #8798A8;
-  --grid-line: #1E2A37;
+  --color-text: #F2F6FA;
+  --color-muted: #8B96A5;
+  --grid-line: #151A21;
 }
 
 /* ─── Light ────────────────────────────────────────────────────────────────
    A cool paper ground, not cream. Brass darkens substantially to clear AA
    contrast on white, and the direction pair deepens for the same reason — a
-   tint that reads confidently on slate disappears on paper. */
+   tint that reads confidently on black disappears on paper. */
 
 [data-theme="light"] {
   --color-gray-950: #EDF1F5;
   --color-gray-900: #FFFFFF;
-  --color-gray-800: #F2F5F8;
-  --color-gray-750: #EDF1F5;
-  --color-gray-700: #DFE6ED;
+  --color-gray-800: #FFFFFF;
+  --color-gray-750: #F4F7FA;
+  --color-gray-700: #E3E9EF;
   --color-gray-600: #C7D2DD;
   --color-gray-500: #8494A3;
   --color-gray-400: #5A6875;
   --color-gray-300: #404D5A;
   --color-gray-200: #2A3642;
-  --color-gray-100: #1A242F;
-  --color-gray-50:  #101820;
+  --color-gray-100: #16202B;
+  --color-gray-50:  #0B1218;
 
   --color-indigo-900: #F5E9D2;
   --color-indigo-800: #EBD8B4;
@@ -111,19 +126,20 @@
   --color-indigo-200: #5C3F0D;
   --color-indigo-100: #4D340B;
 
-  --color-emerald-900: #DDF2EA;
-  --color-emerald-800: #B8E2D3;
-  --color-emerald-400: #0F7355;
-  --color-emerald-300: #0C5C44;
-  --color-green-400:   #0F7355;
-  --color-green-500:   #0C5C44;
+  --color-emerald-900: #D9F5E9;
+  --color-emerald-800: #AEE8CE;
+  --color-emerald-500: #04794F;
+  --color-emerald-400: #05875A;
+  --color-emerald-300: #046345;
+  --color-green-400:   #05875A;
+  --color-green-500:   #04794F;
 
-  --color-red-900: #FBE4DE;
-  --color-red-800: #F5CBC0;
-  --color-red-700: #E0A492;
-  --color-red-500: #A63F2B;
-  --color-red-400: #B34632;
-  --color-red-300: #8F3524;
+  --color-red-900: #FCE3DD;
+  --color-red-800: #F7C9BE;
+  --color-red-700: #E2A090;
+  --color-red-500: #B23A22;
+  --color-red-400: #C04026;
+  --color-red-300: #97301C;
 
   --color-blue-900: #DEEBF5;
   --color-blue-400: #1F5B80;
@@ -131,21 +147,24 @@
 
   --color-yellow-400: #8A6217;
   --color-amber-400: #8A6217;
-  --color-white: #101820;
+  --color-white: #0B1218;
   --color-black: #FFFFFF;
 
   --color-bg: #EDF1F5;
   --color-surface: #FFFFFF;
   --color-card: #FFFFFF;
-  --color-border: #DFE6ED;
+  --color-border: #E3E9EF;
+  --color-hairline: #EAEFF4;
   --color-accent: #8A6217;
   --color-accent-hover: #7A5613;
-  --color-green: #0F7355;
-  --color-red: #B34632;
+  --color-up: #05875A;
+  --color-down: #C04026;
+  --color-green: #05875A;
+  --color-red: #C04026;
   --color-yellow: #8A6217;
-  --color-text: #101820;
+  --color-text: #0B1218;
   --color-muted: #5A6875;
-  --grid-line: #DFE6ED;
+  --grid-line: #E8EDF3;
 }
 
 * { box-sizing: border-box; }
@@ -158,8 +177,11 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Numbers must line up column to column. Tabular figures are the cheapest
-   thing that separates a finance UI from a generic dashboard. */
+/* ─── Numbers ──────────────────────────────────────────────────────────────
+   Figures must line up column to column and never reflow as they tick.
+   Tabular figures are the cheapest thing that separates a finance UI from a
+   generic dashboard. */
+
 table, .tabular, input[type="number"], .recharts-text {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum";
@@ -170,12 +192,71 @@ table, .tabular, input[type="number"], .recharts-text {
   font-variant-numeric: tabular-nums;
 }
 
+/* The display figure: the one number a screen is actually about. Tight
+   tracking at large sizes, because default tracking makes big numerals look
+   like a heading rather than a readout. */
+.figure {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+  letter-spacing: -0.02em;
+  font-weight: 600;
+}
+.figure-xl { font-size: clamp(2.5rem, 6vw, 3.75rem); line-height: 1; letter-spacing: -0.035em; }
+.figure-lg { font-size: 1.75rem; line-height: 1.1; letter-spacing: -0.025em; }
+.figure-md { font-size: 1.125rem; line-height: 1.2; }
+
+/* The label above a figure. Small, wide, quiet — it gets out of the way. */
+.eyebrow {
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-muted);
+  font-weight: 500;
+}
+
+/* ─── Direction ────────────────────────────────────────────────────────────
+   One pair of classes so nothing in the app hand-picks a P&L colour. */
+
+.up   { color: var(--color-up); }
+.down { color: var(--color-down); }
+
+/* Hairline: the separator a trading surface uses instead of a card border. */
+.hairline { border-color: var(--color-hairline); }
+
+/* A chart that bleeds to the panel edge. Cancels the panel's own padding so
+   the plot touches the sides — the single strongest cue that a surface is a
+   quote screen and not a widget. */
+.bleed { margin-left: -1.25rem; margin-right: -1.25rem; }
+.bleed-b { margin-bottom: -1.25rem; }
+
+/* ─── Motion ───────────────────────────────────────────────────────────────
+   A figure that has just changed flashes its direction, the way a tape does.
+   Short enough to register peripherally and not be read as decoration. */
+
+@keyframes tick-up   { from { background-color: color-mix(in srgb, var(--color-up) 22%, transparent); } to { background-color: transparent; } }
+@keyframes tick-down { from { background-color: color-mix(in srgb, var(--color-down) 22%, transparent); } to { background-color: transparent; } }
+.flash-up   { animation: tick-up 700ms ease-out; }
+.flash-down { animation: tick-down 700ms ease-out; }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.35; }
+}
+.live-dot { animation: pulse-dot 2.4s ease-in-out infinite; }
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: none; }
+}
+.rise { animation: rise 320ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: var(--color-surface); }
 ::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--color-muted); }
 
 .recharts-cartesian-grid line { stroke: var(--grid-line); }
+.recharts-surface { overflow: visible; }
 
 :focus-visible {
   outline: 2px solid var(--color-accent);
@@ -187,4 +268,12 @@ table, .tabular, input[type="number"], .recharts-text {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* The tape scrolls exactly half its width, then snaps — the strip renders its
+   quotes twice, so the reset lands on an identical frame and reads as an
+   unbroken loop. */
+@keyframes tape {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
 }
