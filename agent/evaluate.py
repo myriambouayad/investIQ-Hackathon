@@ -170,42 +170,75 @@ def compare(strategy: pd.Series, benchmark: pd.Series) -> dict:
     }
 
 
-# ── The run loop ─────────────────────────────────────────────────────────────
+# ── The desk ─────────────────────────────────────────────────────────────────
 
-def run(
-    prices: pd.DataFrame,
-    config: Optional[RunConfig] = None,
-    news_provider: Optional[news_mod.NewsProvider] = None,
-) -> RunResult:
-    """Drive signals -> decision -> risk gate -> paper broker over the window."""
-    from .paper import PaperBroker  # local import keeps the module graph flat
+class Desk:
+    """One bar at a time: signals -> decision -> risk gate -> paper broker.
 
-    cfg = config or RunConfig()
-    universe = list(cfg.universe) if cfg.universe else list(prices.columns)
-    if cfg.benchmark_symbol not in prices.columns:
-        raise ValueError(f"benchmark {cfg.benchmark_symbol!r} is not in the price data")
+    `run` below drives this over a whole window; `agent.bot` drives the same
+    object forward a bar at a time from an API call. Both therefore execute the
+    identical loop, so the five rules in the module docstring are properties of
+    this class rather than of whoever calls it -- an interactive bot cannot
+    quietly acquire a kinder fill model than the backtest it is reported
+    against. `test_agent.py::stepping_the_desk_matches_the_backtest` pins the
+    equivalence to the cent.
+    """
 
-    feats = signals.features(prices)
-    regime = signals.classify_regime(prices[cfg.benchmark_symbol])
+    def __init__(
+        self,
+        prices: pd.DataFrame,
+        config: Optional[RunConfig] = None,
+        news_provider: Optional[news_mod.NewsProvider] = None,
+    ) -> None:
+        from .paper import PaperBroker  # local import keeps the module graph flat
 
-    provider = news_provider or (
-        news_mod.default_provider(prices) if cfg.use_news else news_mod.NullNewsProvider()
-    )
+        cfg = config or RunConfig()
+        if cfg.benchmark_symbol not in prices.columns:
+            raise ValueError(f"benchmark {cfg.benchmark_symbol!r} is not in the price data")
 
-    dates = [d for d in signals.tradable_dates(prices)
-             if (cfg.start is None or d >= cfg.start) and (cfg.end is None or d <= cfg.end)]
-    if len(dates) < 30:
-        raise ValueError("need at least 30 tradable bars after warmup")
+        universe = list(cfg.universe) if cfg.universe else list(prices.columns)
+        unknown = [s for s in universe if s not in prices.columns]
+        if unknown:
+            raise ValueError(f"not in the price data: {', '.join(sorted(unknown))}")
 
-    broker = PaperBroker(cfg.initial_cash, cfg.costs)
-    journal = Journal()
-    veto_counts: Dict[str, int] = {}
-    breaker_events: List[dict] = []
-    pending: List[decide.Proposal] = []
-    halted = False
+        self.prices = prices
+        self.config = cfg
+        self.universe = universe
+        self.feats = signals.features(prices)
+        self.regime = signals.classify_regime(prices[cfg.benchmark_symbol])
+        self.provider = news_provider or (
+            news_mod.default_provider(prices) if cfg.use_news
+            else news_mod.NullNewsProvider()
+        )
 
-    for date in dates:
+        self.broker = PaperBroker(cfg.initial_cash, cfg.costs)
+        self.journal = Journal()
+        self.veto_counts: Dict[str, int] = {}
+        self.breaker_events: List[dict] = []
+        self.pending: List[decide.Proposal] = []
+        self.halted = False
+        self.bars: List[pd.Timestamp] = []
+
+    # ── The window ───────────────────────────────────────────────────────────
+
+    def window(self) -> List[pd.Timestamp]:
+        """Tradable bars inside the configured start/end, warmup already applied."""
+        cfg = self.config
+        return [
+            d for d in signals.tradable_dates(self.prices)
+            if (cfg.start is None or d >= cfg.start) and (cfg.end is None or d <= cfg.end)
+        ]
+
+    # ── One bar ──────────────────────────────────────────────────────────────
+
+    def step(self, date: pd.Timestamp) -> None:
+        """Mark, exit, execute yesterday's proposals, then form tomorrow's."""
+        cfg = self.config
+        prices = self.prices
+        broker = self.broker
+        journal = self.journal
         row_prices = prices.loc[date]
+        self.bars.append(pd.Timestamp(date))
 
         broker.mark(date, row_prices)
         broker.process_exits(date, row_prices)
@@ -218,7 +251,7 @@ def run(
         # rule that only blocks entries is not a flatten rule.
         if action in (Action.FLATTEN, Action.BLOCKED) and broker.positions:
             broker.flatten_all(date, row_prices, f"breaker_{action.value}")
-            breaker_events.append({
+            self.breaker_events.append({
                 "date": date.strftime("%Y-%m-%d"),
                 "action": action.value,
                 "breakers": [b.name for b in breakers],
@@ -226,15 +259,15 @@ def run(
                 "equity": round(state.equity, 2),
             })
         if action is Action.BLOCKED:
-            halted = True
+            self.halted = True
 
-        if halted:
-            pending = []
-            continue
+        if self.halted:
+            self.pending = []
+            return
 
         # ── Execute yesterday's proposals at today's close ────────────────
         opened = 0
-        for proposal in pending:
+        for proposal in self.pending:
             if opened >= cfg.max_new_per_bar:
                 break
             sym = proposal.symbol
@@ -258,7 +291,7 @@ def run(
                     ),
                     proposal=proposal,
                 ))
-                _bump(veto_counts, "MOVED_TOO_FAR")
+                _bump(self.veto_counts, "MOVED_TOO_FAR")
                 continue
 
             intent = _reprice(proposal.intent, exec_close, cfg.costs)
@@ -276,7 +309,7 @@ def run(
             )
 
             if not decision.approved:
-                _bump(veto_counts, decision.veto_code)
+                _bump(self.veto_counts, decision.veto_code)
                 journal.record(JournalEntry(
                     date=date, symbol=sym, stage="risk_gate",
                     outcome="vetoed", code=decision.veto_code,
@@ -287,7 +320,7 @@ def run(
 
             fill = broker.open_position(date, intent, decision.quantity, exec_close)
             if fill is None:
-                _bump(veto_counts, "INSUFFICIENT_CASH")
+                _bump(self.veto_counts, "INSUFFICIENT_CASH")
                 journal.record(JournalEntry(
                     date=date, symbol=sym, stage="execution",
                     outcome="cancelled", code="INSUFFICIENT_CASH",
@@ -311,52 +344,79 @@ def run(
             ))
 
         # ── Form tomorrow's proposals from today's close ──────────────────
-        pending = []
+        self.pending = []
         if policy.blocks_new_entries(action):
-            continue
+            return
 
-        label, stability = regime.at(date)
+        label, stability = self.regime.at(date)
         if label == "unknown":
-            continue
+            return
 
         bar_close = pd.Timestamp(date).to_pydatetime().replace(
             hour=21, minute=0, second=0, microsecond=0, tzinfo=timezone.utc
         )
         candidates: List[decide.Proposal] = []
-        for sym in universe:
-            if sym not in feats or sym in broker.positions:
+        for sym in self.universe:
+            if sym not in self.feats or sym in broker.positions:
                 continue
-            frame = feats[sym]
+            frame = self.feats[sym]
             if date not in frame.index:
                 continue
-            ns = news_mod.sentiment_at(provider, sym, bar_close) if cfg.use_news else None
+            ns = (news_mod.sentiment_at(self.provider, sym, bar_close)
+                  if cfg.use_news else None)
             candidates.append(decide.decide(
                 sym, frame.loc[date], label, stability, ns,
                 costs=cfg.costs, as_of=bar_close, strategy_name=cfg.strategy_name,
             ))
 
-        pending = decide.rank(candidates, cfg.max_new_per_bar)
-        for p in pending:
+        self.pending = decide.rank(candidates, cfg.max_new_per_bar)
+        for p in self.pending:
             journal.record(JournalEntry(
                 date=date, symbol=p.symbol, stage="proposal", outcome="proposed",
                 code="OK", detail=p.rationale(), proposal=p,
             ))
 
-    final_prices = prices.loc[dates[-1]]
-    broker.flatten_all(dates[-1], final_prices, "end_of_test")
+    # ── Results ──────────────────────────────────────────────────────────────
 
-    return RunResult(
-        equity=broker.equity_curve(),
-        returns=broker.returns(),
-        broker_stats=broker.stats(),
-        journal=journal,
-        veto_counts=veto_counts,
-        breaker_events=breaker_events,
-        config=cfg,
-        news_source=provider.source,
-        start=dates[0],
-        end=dates[-1],
-    )
+    def close_out(self, date: pd.Timestamp) -> None:
+        """Flatten everything at `date`. A backtest must not report open risk."""
+        self.broker.flatten_all(date, self.prices.loc[date], "end_of_test")
+
+    def result(self) -> RunResult:
+        if not self.bars:
+            raise ValueError("the desk has not stepped a single bar")
+        return RunResult(
+            equity=self.broker.equity_curve(),
+            returns=self.broker.returns(),
+            broker_stats=self.broker.stats(),
+            journal=self.journal,
+            veto_counts=self.veto_counts,
+            breaker_events=self.breaker_events,
+            config=self.config,
+            news_source=self.provider.source,
+            start=self.bars[0],
+            end=self.bars[-1],
+        )
+
+
+# ── The run loop ─────────────────────────────────────────────────────────────
+
+def run(
+    prices: pd.DataFrame,
+    config: Optional[RunConfig] = None,
+    news_provider: Optional[news_mod.NewsProvider] = None,
+) -> RunResult:
+    """Drive signals -> decision -> risk gate -> paper broker over the window."""
+    desk = Desk(prices, config, news_provider)
+    dates = desk.window()
+    if len(dates) < 30:
+        raise ValueError("need at least 30 tradable bars after warmup")
+
+    for date in dates:
+        desk.step(date)
+
+    desk.close_out(dates[-1])
+    return desk.result()
 
 
 def _bump(counter: Dict[str, int], key: str) -> None:

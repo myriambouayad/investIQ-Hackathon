@@ -38,6 +38,14 @@ A full-stack investment strategy simulator with real market data, historical bac
 - Walk-forward split reporting in-sample and out-of-sample separately
 - **No live mode.** No broker client, no credentials, no order submission
 
+### Trading bot — on the dashboard
+- The same desk, stepped one daily bar at a time: play, pause, step, skip
+- Live view of open positions, the intents queued for the next bar, and the
+  decision journal with the evidence behind every score
+- The risk cascade drawn against the thresholds that actually fire
+- Charted against buy-and-hold over the identical bars, whichever way that goes
+- A replay of historical bars, labelled as one. Still no broker, still no live mode
+
 ## Quick Start (Local Dev)
 
 ### 1. Backend
@@ -79,7 +87,7 @@ docker-compose up --build
 ```bash
 python test_engine.py       # 20 tests — allocation, backtest, Monte Carlo
 python test_trading.py      # 42 tests — the risk gate and its boundaries
-python test_agent.py        # 49 tests — the paper desk, lookahead and honesty checks
+python test_agent.py        # 65 tests — the paper desk, the bot, lookahead and honesty checks
 
 python run_demo.py          # portfolio simulation walkthrough
 python run_risk_demo.py     # 10 risk-gate scenarios
@@ -122,6 +130,11 @@ All endpoints (except `/health` and `/auth/*`) require `Authorization: Bearer <t
 | POST | `/agent/backtest` | One window vs benchmark, with significance |
 | POST | `/agent/walk-forward` | In-sample and out-of-sample, reported apart |
 | GET | `/agent/regime` | Recent market-regime labels |
+| GET | `/agent/bot` | Bot session state, or the defaults to start one |
+| POST | `/agent/bot/start` | Open a session (replaces any existing one) |
+| POST | `/agent/bot/step` | Advance N bars, or to the end of the session |
+| POST | `/agent/bot/run` | Set the play/pause flag |
+| DELETE | `/agent/bot` | Discard the session |
 | GET | `/scenarios/` | List saved scenarios |
 | POST | `/scenarios/` | Save a scenario |
 | DELETE | `/scenarios/{id}` | Delete a scenario |
@@ -132,7 +145,8 @@ This platform is for educational purposes only. All projections are based on
 historical data and do not constitute financial advice. Past performance does
 not guarantee future results. Available to US residents only.
 
-**No real-money trading.** The agent desk is a simulation. There is no broker
+**No real-money trading.** The agent desk and the dashboard trading bot are
+simulations. There is no broker
 connection, no API credential and no live mode anywhere in this codebase, and a
 test enforces that (`test_agent.py::no_broker_imports_anywhere`). The
 backtested strategy shipped here **does not beat buy-and-hold** over the tested

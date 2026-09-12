@@ -9,10 +9,11 @@ against buy-and-hold with a multiple-testing penalty applied.
 ```bash
 python run_agent_demo.py          # scan + backtest + walk forward
 python run_agent_demo.py --scan   # just today's proposals, decomposed
-python test_agent.py              # 49 tests
+python test_agent.py              # 65 tests
 ```
 
-In the app: **Agent desk** in the navbar, or `/agent`.
+In the app: **Agent desk** in the navbar, or `/agent`. The same desk runs a
+bar at a time as the **AI Trading Bot** panel on `/dashboard` — see below.
 
 ---
 
@@ -37,7 +38,8 @@ that constant as a switch — it exists so the answer is greppable.
 | `agent/decide.py` | The weighted evidence sum. Emits `OrderIntent`, never a size |
 | `agent/costs.py` | Commission, spread, slippage, borrow — realised vs marginal |
 | `agent/paper.py` | Simulated broker: fills, stops, partial exits, equity curve |
-| `agent/evaluate.py` | The harness: execution lag, risk gate, benchmark, walk-forward |
+| `agent/evaluate.py` | `Desk`, the bar loop — execution lag, risk gate, benchmark, walk-forward |
+| `agent/bot.py` | The dashboard bot: one `Desk` held alive, stepped on demand |
 | `agent/stats.py` | Deflated Sharpe, alpha/beta, inverse normal (no scipy) |
 | `agent/journal.py` | The audit trail — every proposal, veto and fill, with evidence |
 
@@ -231,6 +233,94 @@ All endpoints require `Authorization: Bearer <token>`.
 
 Backtests run in a worker thread and are cached by request signature, so a
 repeated call returns in milliseconds rather than seconds.
+
+---
+
+## The bot on the dashboard
+
+`/dashboard` carries an **AI Trading Bot** panel: the same desk, stepped one
+daily bar at a time instead of run end-to-end. Play, pause, step a single day,
+or skip to the last bar in the data.
+
+```bash
+python -c "
+from engine.data import load_prices
+from agent.bot import TradingBot, BotConfig
+prices, src = load_prices()
+b = TradingBot(prices, BotConfig(initial_cash=25_000), data_source=src)
+b.step(120); print(b.snapshot()['account'])
+"
+```
+
+### It is the backtest, not a second implementation
+
+`evaluate.Desk` owns the bar loop. `evaluate.run` drives it start to finish;
+`agent.bot.TradingBot` holds one alive between HTTP requests and advances the
+cursor on demand. Neither one reimplements the other, so the execution lag, the
+risk gate, the cost model and the stop handling on the dashboard are the ones
+the harness was tested with.
+
+Two tests pin it rather than leaving it to code review:
+`stepping_the_desk_matches_the_backtest` steps a desk bar by bar and asserts the
+equity curve equals a straight-through run's *to the cent*, and
+`bot_replays_exactly_what_a_backtest_would_have_done` makes the same claim
+through the public bot API. A bot that drifted from the backtest would be an
+untested strategy wearing a tested one's reputation.
+
+### It is a replay, and the API says so
+
+`snapshot()["mode"]` is `"replay"`. The session starts `session_bars` before the
+newest bar in the price data and walks toward it — there is no live feed, and
+`LIVE_TRADING_SUPPORTED` is still False, still with no broker client in the
+process. `no_broker_imports_anywhere` walks `bot.py` along with everything else.
+
+State is in memory, and `snapshot()["ephemeral"]` is True so the UI can say so.
+A paper bot whose positions survived a restart would be a trading system of
+record, which needs reconciliation and a retained audit log before it earns the
+name.
+
+### What the panel refuses to hide
+
+- **The benchmark, always.** Buy-and-hold over the identical bars is on the same
+  chart and in the headline row. On the shipped synthetic data the bot loses to
+  it, and the panel prints that in red rather than showing the equity line alone.
+- **Vetoes next to fills.** The journal lists what the gate refused, with the
+  ordered checks and the one that failed. If the gate refused four fifths of
+  what the desk wanted, the curve belongs to the gate.
+- **The queue carries no size.** A pending intent shows entry, stop, targets and
+  reward — never a share count, because it has none until the risk gate sizes it
+  on the bar that fills it. `bot_queue_never_carries_a_size` checks the
+  serialised payload for `quantity`, `qty`, `size` and `shares`.
+- **Two equity figures, reconciled.** `mark` records the curve at the top of a
+  bar; fills then happen at that same close and move nothing but the costs they
+  pay. So the headline equity sits one bar's costs below the chart's last point,
+  and `account.costs_this_bar` is exactly that difference —
+  `bot_accounts_for_the_gap_between_its_two_equity_figures` asserts it against
+  the bar's fills on every bar of a session.
+- **Thresholds come from `policy.py`.** The cascade gauges are drawn against
+  `risk.thresholds` served by the API. A dashboard holding its own copy of -2%
+  would keep drawing it there after someone edited the policy.
+
+### API
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/api/agent/bot` | The session, or the defaults needed to start one |
+| POST | `/api/agent/bot/start` | Opens a session, replacing any existing one |
+| POST | `/api/agent/bot/step` | `{bars}` or `{to_end: true}`; reports `bars_taken` |
+| POST | `/api/agent/bot/run` | The advisory play/pause flag |
+| DELETE | `/api/agent/bot` | Discards the session |
+
+One bot per user, bounded at twelve and evicted oldest-first, because each one
+pins a features frame per symbol for the life of the process. Stepping is
+CPU-bound so it runs in a worker thread, behind a per-user lock — two
+overlapping step requests against one bot would interleave bars and corrupt the
+curve.
+
+The server never steps on a timer of its own. `Play` is the browser asking for
+four bars at a time; a bot that advanced in the background would keep trading
+after the user closed the tab, and nothing about this being a simulation makes
+that a good default.
 
 ---
 

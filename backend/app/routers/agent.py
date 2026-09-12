@@ -33,7 +33,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from agent import decide, evaluate, news as news_mod, signals   # noqa: E402
+from agent import bot as bot_mod, decide, evaluate, news as news_mod, signals  # noqa: E402
 from agent.costs import CostModel                               # noqa: E402
 from agent.paper import LIVE_TRADING_SUPPORTED                  # noqa: E402
 from engine.data import load_prices                             # noqa: E402
@@ -57,6 +57,10 @@ DISCLAIMER = (
 def _prices() -> pd.DataFrame:
     prices, _ = load_prices()
     return prices
+
+
+def _prices_with_source() -> tuple[pd.DataFrame, str]:
+    return load_prices()
 
 
 def _costs(body) -> CostModel:
@@ -302,3 +306,188 @@ async def regime_history(
         "counts": counts,
         "min_stability_to_trade": 3,
     }
+
+
+# ── The bot ──────────────────────────────────────────────────────────────────
+#
+# One live `agent.bot.TradingBot` per user, held in memory. The bot is a desk
+# with a cursor: the client advances it and re-reads the snapshot, so the state
+# has to survive between requests, which a cache keyed by request signature
+# cannot do.
+#
+# In memory and not in the database, deliberately. A paper bot whose positions
+# outlived a restart would be a trading system of record, and that needs
+# reconciliation and a retained audit log before it earns the name. Every
+# response carries `ephemeral: true` so the UI states the limit rather than
+# letting the user discover it.
+#
+# Stepping is CPU-bound -- the desk scores the whole universe per bar -- so it
+# runs in a worker thread, and a per-user lock serialises it: two overlapping
+# step requests against one bot would interleave bars and corrupt the curve.
+
+_BOTS = bot_mod.BotRegistry(limit=12)
+_BOT_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _bot_lock(key: str) -> asyncio.Lock:
+    lock = _BOT_LOCKS.get(key)
+    if lock is None:
+        lock = _BOT_LOCKS[key] = asyncio.Lock()
+    return lock
+
+
+async def _off_thread(fn):
+    return await asyncio.get_event_loop().run_in_executor(None, fn)
+
+
+class BotSettings(CostInputs):
+    initial_cash: float = Field(25_000.0, gt=0, le=10_000_000)
+    symbols: Optional[List[str]] = None
+    benchmark_symbol: str = "VTI"
+    max_new_per_bar: int = Field(2, ge=1, le=5)
+    use_news: bool = True
+    session_bars: int = Field(
+        bot_mod.DEFAULT_SESSION_BARS,
+        ge=bot_mod.MIN_SESSION_BARS,
+        le=bot_mod.MAX_SESSION_BARS,
+    )
+    # Bars to replay immediately on start, so the panel opens with a curve
+    # instead of a flat line. Capped at the session length by the bot.
+    advance: int = Field(0, ge=0, le=bot_mod.MAX_SESSION_BARS)
+
+
+class BotStepRequest(BaseModel):
+    bars: int = Field(1, ge=1, le=bot_mod.MAX_STEP_BARS)
+    to_end: bool = False
+
+
+class BotRunRequest(BaseModel):
+    running: bool
+
+
+def _bot_defaults() -> dict:
+    """Everything the client needs to render the start form before a bot exists."""
+    prices, source = _prices_with_source()
+    return {
+        "exists": False,
+        "mode": "replay",
+        "ephemeral": True,
+        "live_trading_supported": LIVE_TRADING_SUPPORTED,
+        "universe": list(prices.columns),
+        "data_source": source,
+        "defaults": BotSettings().model_dump(),
+        "session_bars_range": [bot_mod.MIN_SESSION_BARS, bot_mod.MAX_SESSION_BARS],
+        "max_step_bars": bot_mod.MAX_STEP_BARS,
+        "first_bar": signals.tradable_dates(prices)[0].strftime("%Y-%m-%d"),
+        "last_bar": signals.tradable_dates(prices)[-1].strftime("%Y-%m-%d"),
+        "risk_limits": {
+            "risk_per_trade": policy.RISK_PER_TRADE,
+            "max_concentration": policy.MAX_CONCENTRATION,
+            "max_open_risk": policy.MAX_OPEN_RISK,
+            "max_positions": policy.MAX_POSITIONS,
+            "min_risk_reward": policy.MIN_RISK_REWARD,
+        },
+        "disclaimer": DISCLAIMER,
+    }
+
+
+def _snapshot(bot: bot_mod.TradingBot) -> dict:
+    return {"exists": True, **bot.snapshot()}
+
+
+def _require(key: str) -> bot_mod.TradingBot:
+    bot = _BOTS.get(key)
+    if bot is None:
+        raise HTTPException(404, "no bot session; start one first")
+    return bot
+
+
+@router.get("/bot")
+async def bot_state(current_user: User = Depends(get_current_user)):
+    """The bot's current state, or the defaults needed to start one."""
+    bot = _BOTS.get(str(current_user.id))
+    if bot is None:
+        return await _off_thread(_bot_defaults)
+    return _snapshot(bot)
+
+
+@router.post("/bot/start")
+async def bot_start(
+    body: BotSettings, current_user: User = Depends(get_current_user)
+):
+    """Open a session. Replaces any existing one for this user.
+
+    Building the bot derives features over the full price history, which is a
+    second or two of pandas, so it happens off the event loop like the
+    backtests do.
+    """
+    key = str(current_user.id)
+
+    def _build() -> bot_mod.TradingBot:
+        prices, source = _prices_with_source()
+        config = bot_mod.BotConfig(
+            initial_cash=body.initial_cash,
+            symbols=body.symbols or None,
+            benchmark_symbol=body.benchmark_symbol,
+            max_new_per_bar=body.max_new_per_bar,
+            use_news=body.use_news,
+            session_bars=body.session_bars,
+            costs=_costs(body),
+        )
+        bot = bot_mod.TradingBot(prices, config, data_source=source)
+        if body.advance:
+            bot.step(body.advance)
+        return bot
+
+    async with _bot_lock(key):
+        try:
+            bot = await _off_thread(_build)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc))
+        _BOTS.put(key, bot)
+
+    return _snapshot(bot)
+
+
+@router.post("/bot/step")
+async def bot_step(
+    body: BotStepRequest, current_user: User = Depends(get_current_user)
+):
+    """Advance the bot. Returns the snapshot after the bars were taken.
+
+    `bars_taken` can be less than asked for: at the end of the session, or when
+    the drawdown breaker halts the desk part way through a chunk.
+    """
+    key = str(current_user.id)
+    async with _bot_lock(key):
+        bot = _require(key)
+        taken = await _off_thread(
+            bot.run_to_end if body.to_end else (lambda: bot.step(body.bars))
+        )
+
+    return {"bars_taken": taken, **_snapshot(bot)}
+
+
+@router.post("/bot/run")
+async def bot_run(
+    body: BotRunRequest, current_user: User = Depends(get_current_user)
+):
+    """Set the advisory play/pause flag the client drives its stepping from.
+
+    The server does not step on a timer of its own. A bot that advanced in the
+    background would keep trading after the user closed the tab, and nothing
+    about this being a simulation makes that a good default.
+    """
+    key = str(current_user.id)
+    bot = _require(key)
+    bot.running = body.running and not bot.up_to_date and not bot.desk.halted
+    return _snapshot(bot)
+
+
+@router.delete("/bot")
+async def bot_reset(current_user: User = Depends(get_current_user)):
+    """Discard the session. The next start begins from initial cash."""
+    key = str(current_user.id)
+    async with _bot_lock(key):
+        existed = _BOTS.drop(key)
+    return {"reset": existed, **(await _off_thread(_bot_defaults))}

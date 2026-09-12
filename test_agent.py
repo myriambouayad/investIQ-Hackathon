@@ -9,13 +9,14 @@ source that accidentally knows the future. Those are checked first and hardest.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from agent import decide, evaluate, journal, news, paper, signals, stats
+from agent import bot, decide, evaluate, journal, news, paper, signals, stats
 from agent.costs import CostModel
 from trading import policy
 from trading.types import AccountState, OrderIntent, Side
@@ -592,13 +593,23 @@ def t_alpha_beta_recovers_a_known_relationship():
 # ── Journal ──────────────────────────────────────────────────────────────────
 
 def t_journal_reconstructs_evidence():
+    """The explainability contract, asserted on the serialised record.
+
+    `evidence_sums_to_score` pins it on the live objects. This pins it on what
+    a client actually receives, which is the form in which an explanation can
+    silently stop reconstructing the number it claims to explain -- the journal
+    now carries raw_score and conviction precisely so this can be exact rather
+    than approximate.
+    """
     result = evaluate.run(PRICES, evaluate.RunConfig(start=pd.Timestamp("2024-01-01")))
     recs = [r for r in result.journal.to_records() if "evidence" in r]
     assert recs, "no journal entry carried evidence"
-    for r in recs[:40]:
+    for r in recs:
         total = sum(e["contribution"] for e in r["evidence"])
-        assert abs(total - r["score"] / max(1e-9, r.get("conviction", 1.0))) < 0.02 or \
-               abs(total) >= abs(r["score"]) - 1e-6
+        # Both sides are rounded to 4dp in the record, so the tolerance is the
+        # rounding and nothing else.
+        assert abs(total - r["raw_score"]) < 1e-3, (r["symbol"], total, r["raw_score"])
+        assert abs(r["raw_score"] * r["conviction"] - r["score"]) < 1e-3, r["symbol"]
 
 
 def t_walk_forward_reports_both_windows():
@@ -606,6 +617,252 @@ def t_walk_forward_reports_both_windows():
                                config=evaluate.RunConfig(start=pd.Timestamp("2021-01-01")))
     assert wf["in_sample"]["window"]["end"] < wf["out_of_sample"]["window"]["start"]
     assert "out-of-sample" in wf["reading_guide"]
+
+
+# ── The bot ──────────────────────────────────────────────────────────────────
+
+def t_stepping_the_desk_matches_the_backtest():
+    """The invariant the whole dashboard rests on.
+
+    A `Desk` advanced one bar at a time must produce exactly what `run` produces
+    over the same window. If it does not, the bot on the dashboard is a second
+    trading implementation wearing the backtest's reputation, and every figure it
+    shows is unsupported by the harness that was actually tested.
+    """
+    cfg = evaluate.RunConfig(initial_cash=25_000.0, start=pd.Timestamp("2024-06-01"))
+    straight = evaluate.run(PRICES, cfg)
+
+    desk = evaluate.Desk(PRICES, cfg)
+    for date in desk.window():
+        desk.step(date)
+    desk.close_out(desk.window()[-1])
+    stepped = desk.result()
+
+    assert len(stepped.equity) == len(straight.equity)
+    assert (stepped.equity.index == straight.equity.index).all()
+    # To the cent, not to a tolerance: the two are the same arithmetic.
+    assert (stepped.equity.round(2) == straight.equity.round(2)).all(), (
+        "stepping diverged from the straight-through run"
+    )
+    assert stepped.broker_stats["closed_trades"] == straight.broker_stats["closed_trades"]
+    assert stepped.veto_counts == straight.veto_counts
+
+
+def t_bot_replays_exactly_what_a_backtest_would_have_done():
+    """Same claim, made against the public bot API rather than `Desk`."""
+    b = bot.TradingBot(PRICES, bot.BotConfig(initial_cash=25_000.0, session_bars=120))
+    b.run_to_end()
+
+    session = b.session
+    straight = evaluate.run(PRICES, evaluate.RunConfig(
+        initial_cash=25_000.0, start=session[0], end=session[-1],
+    ))
+
+    curve = b.desk.broker.equity_curve()
+    assert len(curve) == len(straight.equity)
+    assert (curve.round(2) == straight.equity.round(2)).all(), (
+        "the bot's curve is not the backtest's curve"
+    )
+
+
+def t_bot_does_not_step_past_its_session():
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=60))
+    assert b.step(45) == 45
+    assert b.step(100) == 15, "over-stepping must short-step, not overrun"
+    assert b.up_to_date and b.bars_remaining == 0
+    assert b.step(5) == 0
+    assert b.status == "up_to_date"
+
+
+def t_bot_holds_positions_rather_than_flattening():
+    """A bot is not a finished backtest.
+
+    `run` flattens at the end of the window because a report must not carry open
+    risk. The bot must not: a desk that closed everything each time you stopped
+    stepping would be a different strategy.
+    """
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=260))
+    b.run_to_end()
+    snap = b.snapshot()
+    assert snap["positions"] or snap["closed_trades"], "the bot did nothing at all"
+    assert len(snap["positions"]) == len(b.desk.broker.positions)
+    assert any("Positions are open" in c for c in snap["caveats"])
+
+
+def t_bot_declares_that_it_cannot_trade_for_real():
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=50))
+    b.step(10)
+    snap = b.snapshot()
+    assert snap["live_trading_supported"] is False
+    assert snap["mode"] == "replay"
+    assert snap["ephemeral"] is True
+    assert "no broker is connected" in snap["disclaimer"].lower()
+    assert any("replay of historical bars" in c for c in snap["caveats"])
+
+
+def t_bot_queue_never_carries_a_size():
+    """The proposal has no quantity, so the queue must not invent one.
+
+    A queue that showed a share count would be showing a number the risk gate
+    has not computed yet -- it is decided on the bar that fills the intent,
+    against the equity found there.
+    """
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=260))
+    b.run_to_end()
+    banned = ("quantity", "qty", "size", "shares")
+    seen = 0
+    for date in b.session:
+        for item in b.snapshot()["queue"]:
+            seen += 1
+            for key in item:
+                assert key not in banned, f"queue exposed {key!r}"
+            if item.get("intent"):
+                for key in item["intent"]:
+                    assert key not in banned, f"intent exposed {key!r}"
+        break
+    # Also check the class over a session that definitely queued something.
+    fresh = bot.TradingBot(PRICES, bot.BotConfig(session_bars=260))
+    for _ in range(260):
+        fresh.step(1)
+        for item in fresh.snapshot()["queue"]:
+            seen += 1
+            assert not any(k in banned for k in item)
+        if seen:
+            break
+    assert seen > 0, "no proposal was ever queued, so nothing was checked"
+
+
+def t_bot_snapshot_survives_json():
+    """The snapshot is the API response. NaN or a Timestamp in it is a 500."""
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=80))
+    for taken in (0, 1, 40):
+        if taken:
+            b.step(taken)
+        text = json.dumps(b.snapshot(), allow_nan=False)
+        assert "NaN" not in text and "Infinity" not in text
+
+
+def t_bot_snapshot_before_the_first_step_is_empty_not_broken():
+    b = bot.TradingBot(PRICES, bot.BotConfig(initial_cash=30_000.0, session_bars=60))
+    snap = b.snapshot()
+    assert snap["status"] == "idle"
+    assert snap["session"]["as_of"] is None
+    assert snap["session"]["bars_done"] == 0
+    assert snap["account"]["equity"] == 30_000.0
+    assert snap["performance"] is None
+    assert snap["positions"] == [] and snap["equity_curve"] == []
+    assert snap["regime"]["label"] is None
+
+
+def t_bot_stops_stepping_once_halted():
+    """The full stop is a full stop, not a suggestion to keep walking bars."""
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=120))
+    b.step(10)
+    b.desk.halted = True
+    before = b.cursor
+    assert b.step(20) == 1, "a halted desk must stop after the bar that halts it"
+    assert b.cursor == before + 1
+    assert b.running is False
+    assert b.status == "halted"
+    assert b.run_to_end() == 0
+
+
+def t_bot_accounts_for_the_gap_between_its_two_equity_figures():
+    """The headline equity and the chart's last point differ, and by exactly what.
+
+    `mark` records the curve at the top of a bar; fills then happen at that same
+    close and move nothing but the costs they pay. So the difference is the
+    bar's spend on spread and commission and nothing else -- if it ever is not,
+    one of the two numbers on the dashboard is wrong.
+    """
+    b = bot.TradingBot(PRICES, bot.BotConfig(initial_cash=25_000.0, session_bars=260))
+    checked = 0
+    for _ in range(260):
+        b.step(1)
+        snap = b.snapshot()
+        spent = sum(f.commission + f.slippage_cost
+                    for f in b.desk.broker.fills if f.date == b.as_of)
+        assert abs(snap["account"]["costs_this_bar"] - spent) < 0.02, (
+            b.as_of, snap["account"]["costs_this_bar"], spent
+        )
+        assert abs(
+            snap["account"]["marked_equity"]
+            - snap["account"]["equity"]
+            - snap["account"]["costs_this_bar"]
+        ) < 0.02
+        assert snap["account"]["marked_equity"] == snap["equity_curve"][-1]["strategy"]
+        if spent > 0:
+            checked += 1
+    assert checked > 0, "no bar traded, so the reconciliation was never exercised"
+
+
+def t_bot_serves_the_thresholds_it_draws_gauges_from():
+    """The client must not need its own copy of the cascade."""
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=50))
+    b.step(5)
+    th = b.snapshot()["risk"]["thresholds"]
+    assert th["daily_half_size"] == policy.DAILY_HALF_SIZE
+    assert th["daily_flatten"] == policy.DAILY_FLATTEN
+    assert th["weekly_stop"] == policy.WEEKLY_STOP
+    assert th["peak_drawdown_block"] == policy.PEAK_DRAWDOWN_BLOCK
+
+
+def t_bot_rejects_a_symbol_the_price_data_lacks():
+    for bad in (bot.BotConfig(symbols=["NOT_A_TICKER"]),
+                bot.BotConfig(benchmark_symbol="NOT_A_TICKER")):
+        try:
+            bot.TradingBot(PRICES, bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
+
+
+def t_bot_rejects_an_out_of_range_session():
+    for bars in (bot.MIN_SESSION_BARS - 1, bot.MAX_SESSION_BARS + 1):
+        try:
+            bot.TradingBot(PRICES, bot.BotConfig(session_bars=bars))
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted session_bars={bars}")
+
+
+def t_bot_registry_is_bounded():
+    """Each bot pins a features frame per symbol, so the store must evict."""
+    reg = bot.BotRegistry(limit=2)
+    made = {}
+    for key in ("a", "b", "c"):
+        made[key] = bot.TradingBot(PRICES, bot.BotConfig(session_bars=40))
+        reg.put(key, made[key])
+    assert len(reg) == 2
+    assert reg.get("a") is None, "oldest was not evicted"
+    assert reg.get("c") is made["c"]
+    assert reg.drop("c") is True
+    assert reg.drop("c") is False
+
+
+def t_bot_synthetic_news_is_labelled_in_the_snapshot():
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=50), data_source="synthetic")
+    b.step(5)
+    snap = b.snapshot()
+    if snap["news_is_synthetic"]:
+        assert any("synthetic provider" in c for c in snap["caveats"])
+    assert any("synthetic generator" in c for c in snap["caveats"]), (
+        "synthetic prices were not disclosed"
+    )
+
+
+def t_bot_reports_itself_against_buy_and_hold():
+    """An absolute return figure on its own says nothing."""
+    b = bot.TradingBot(PRICES, bot.BotConfig(session_bars=200))
+    b.run_to_end()
+    perf = b.snapshot()["performance"]
+    assert perf is not None and perf["benchmark"] is not None
+    assert "benchmark_total_return" in perf["benchmark"]
+    assert perf["benchmark_symbol"] == "VTI"
+    curve = b.snapshot()["equity_curve"]
+    assert all(pt["benchmark"] is not None for pt in curve), (
+        "the benchmark line has gaps the chart would silently bridge"
+    )
 
 
 if __name__ == "__main__":

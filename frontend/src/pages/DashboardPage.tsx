@@ -4,6 +4,7 @@ import { SimulateForm } from '../components/SimulateForm';
 import { ResultsPanel } from '../components/ResultsPanel';
 import { SavingsAdvisor } from '../components/SavingsAdvisor';
 import { RiskQuestionnaire } from '../components/RiskQuestionnaire';
+import { TradingBot } from '../components/bot/TradingBot';
 import { Card } from '../components/ui/Card';
 import { simulate } from '../api/portfolio';
 import type { SimulationResult, SimulateFormData } from '../types';
@@ -118,6 +119,14 @@ export default function DashboardPage() {
             <ResultsPanel result={result} />
           </div>
         )}
+
+        {/* The trading bot sits below the simulation because it answers a
+            different question: the form above projects a buy-and-hold
+            allocation, while the bot trades one, and the bot's own panel shows
+            it losing to buy-and-hold as readily as beating it. */}
+        <div id="bot">
+          <TradingBot />
+        </div>
       </div>
     </Layout>
   );

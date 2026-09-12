@@ -316,6 +316,134 @@ async def t_risk_policy_exposes_the_cascade():
         assert len(body["policy_hash"]) == 16
 
 
+# ── Trading bot ──────────────────────────────────────────────────────────────
+
+async def t_bot_offers_defaults_before_a_session_exists():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.get("/api/agent/bot", headers=auth(token))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["exists"] is False
+        assert body["live_trading_supported"] is False
+        assert body["universe"], "no universe offered"
+        assert body["session_bars_range"][0] < body["session_bars_range"][1]
+        assert body["first_bar"] < body["last_bar"]
+
+
+async def t_bot_starts_steps_and_reports():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"initial_cash": 25_000, "session_bars": 80, "advance": 40})
+        assert r.status_code == 200, r.text
+        started = r.json()
+        assert started["exists"] is True
+        assert started["mode"] == "replay"
+        assert started["ephemeral"] is True
+        assert started["live_trading_supported"] is False
+        assert started["session"]["bars_done"] == 40
+        assert len(started["equity_curve"]) == 40
+
+        r = await c.post("/api/agent/bot/step", headers=auth(token), json={"bars": 5})
+        stepped = r.json()
+        assert stepped["bars_taken"] == 5
+        assert stepped["session"]["bars_done"] == 45
+        assert stepped["session"]["as_of"] > started["session"]["as_of"]
+
+        r = await c.post("/api/agent/bot/step", headers=auth(token), json={"to_end": True})
+        done = r.json()
+        assert done["session"]["up_to_date"] is True
+        assert done["session"]["bars_done"] == 80
+        assert done["status"] in ("up_to_date", "halted")
+        # Nothing left to take, and asking again is not an error.
+        again = await c.post("/api/agent/bot/step", headers=auth(token), json={"bars": 3})
+        assert again.json()["bars_taken"] == 0
+
+
+async def t_bot_reports_itself_against_a_benchmark():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"session_bars": 120, "advance": 120})
+        perf = r.json()["performance"]
+        assert perf is not None
+        assert perf["benchmark"] is not None, "an absolute return was reported alone"
+        assert "benchmark_total_return" in perf["benchmark"]
+
+
+async def t_bot_step_requires_a_session():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.post("/api/agent/bot/step", headers=auth(token), json={"bars": 1})
+        assert r.status_code == 404, r.text
+
+
+async def t_bot_reset_clears_the_session():
+    async with await client() as c:
+        token = await guest(c)
+        await c.post("/api/agent/bot/start", headers=auth(token),
+                     json={"session_bars": 50, "advance": 20})
+        r = await c.delete("/api/agent/bot", headers=auth(token))
+        assert r.status_code == 200, r.text
+        assert r.json()["reset"] is True
+        assert r.json()["exists"] is False
+        assert (await c.get("/api/agent/bot", headers=auth(token))).json()["exists"] is False
+
+
+async def t_bot_sessions_are_isolated_per_user():
+    """One user's bot must never be visible to another."""
+    async with await client() as c:
+        a, b = await guest(c), await guest(c)
+        await c.post("/api/agent/bot/start", headers=auth(a),
+                     json={"session_bars": 50, "advance": 25})
+        assert (await c.get("/api/agent/bot", headers=auth(b))).json()["exists"] is False
+        mine = await c.get("/api/agent/bot", headers=auth(a))
+        assert mine.json()["session"]["bars_done"] == 25
+        # And B resetting must not touch A's session.
+        await c.delete("/api/agent/bot", headers=auth(b))
+        assert (await c.get("/api/agent/bot", headers=auth(a))).json()["exists"] is True
+
+
+async def t_bot_requires_a_token():
+    async with await client() as c:
+        for call in (
+            c.get("/api/agent/bot"),
+            c.post("/api/agent/bot/start", json={}),
+            c.post("/api/agent/bot/step", json={"bars": 1}),
+            c.delete("/api/agent/bot"),
+        ):
+            r = await call
+            assert r.status_code == 401, (r.request.url, r.status_code)
+
+
+async def t_bot_rejects_bad_settings():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"symbols": ["NOT_A_TICKER"]})
+        assert r.status_code == 422, r.text
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"session_bars": 1})
+        assert r.status_code == 422, r.text
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"initial_cash": -5})
+        assert r.status_code == 422, r.text
+
+
+async def t_bot_serves_the_risk_thresholds_it_is_judged_by():
+    async with await client() as c:
+        token = await guest(c)
+        r = await c.post("/api/agent/bot/start", headers=auth(token),
+                         json={"session_bars": 50, "advance": 10})
+        risk = r.json()["risk"]
+        assert risk["thresholds"]["daily_flatten"] == -0.03
+        assert risk["limits"]["risk_per_trade"] == 0.01
+        assert risk["action"] in ("normal", "half_size", "no_new_entries",
+                                 "flatten", "blocked")
+        assert len(risk["policy_hash"]) == 16
+
+
 if __name__ == "__main__":
     print(f"\ndatabase: {_TMP_DB}\n")
     for name, fn in sorted(globals().items()):

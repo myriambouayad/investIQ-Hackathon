@@ -52,7 +52,15 @@ class JournalEntry:
             ]
         if include_evidence and self.proposal is not None:
             p = self.proposal
+            # raw_score and conviction travel with the score because the
+            # explainability contract is `sum(contributions) == raw_score` and
+            # `score == raw_score * conviction`. A reader given only the score
+            # would have to divide to recover the conviction, which is both
+            # fragile near zero and an invitation to disagree with the module
+            # that actually computed it.
             d["score"] = round(p.score, 4)
+            d["raw_score"] = round(p.raw_score, 4)
+            d["conviction"] = round(p.conviction, 4)
             d["regime"] = p.regime
             d["action"] = p.action
             d["rationale"] = p.rationale()
